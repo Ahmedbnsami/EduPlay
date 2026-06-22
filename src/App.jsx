@@ -8,6 +8,7 @@ import ProgressStepper from "./components/ProgressStepper";
 import ProcessingView from "./components/ProcessingView";
 import ResultsView from "./components/ResultsView";
 import AuthView from "./components/AuthView";
+import LandingPage from "./components/LandingPage";
 import api from "./services/api";
 
 function App() {
@@ -32,7 +33,7 @@ function App() {
   });
 
   const [currentView, setCurrentView] = useState(() =>
-    localStorage.getItem("eduplay-user") ? "home" : "auth",
+    localStorage.getItem("eduplay-user") ? "home" : "landing",
   );
 
   useEffect(() => {
@@ -183,7 +184,7 @@ function App() {
   }, [user]);
 
   const handleNavigateHome = useCallback(() => {
-    setCurrentView(user ? "home" : "auth");
+    setCurrentView(user ? "home" : "landing");
     setCurrentStep(1);
   }, [user]);
 
@@ -211,6 +212,21 @@ function App() {
     setCurrentView(user ? "history" : "auth");
   }, [user]);
 
+  const handleGetStarted = useCallback(() => {
+    setCurrentView(user ? "home" : "auth");
+    setCurrentStep(1);
+  }, [user]);
+
+  const handleUploadMaterial = useCallback(() => {
+    setCurrentView(user ? "home" : "auth");
+    setCurrentStep(1);
+  }, [user]);
+
+  const handleViewDemo = useCallback(() => {
+    setCurrentView("landing");
+    setCurrentStep(1);
+  }, []);
+
   return (
     <div className="min-h-screen flex flex-col bg-surface font-sans">
       <Header
@@ -225,6 +241,14 @@ function App() {
       />
 
       <main className="flex-1 w-full max-w-7xl mx-auto px-4 sm:px-6 py-8 sm:py-12 flex flex-col justify-center">
+        {currentView === "landing" && (
+          <LandingPage
+            onGetStarted={handleGetStarted}
+            onUploadMaterial={handleUploadMaterial}
+            onViewDemo={handleViewDemo}
+          />
+        )}
+
         {currentView === "home" && currentStep > 1 && (
           <div className="mb-10">
             <ProgressStepper currentStep={currentStep} />
