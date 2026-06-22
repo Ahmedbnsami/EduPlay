@@ -33,6 +33,13 @@ export default function ResultsView({ onReset, analysisResult }) {
         </p>
       </div>
 
+      {/* AI Summary fallback */}
+      {analysisResult && analysisResult.aiSummary && (
+        <div className="max-w-4xl mx-auto bg-surface-container comic-border p-4 text-sm text-text-main">
+          {analysisResult.aiSummary}
+        </div>
+      )}
+
       {/* Two-column grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {/* Key Concepts */}

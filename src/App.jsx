@@ -51,6 +51,28 @@ function App() {
     setFile(selectedFile);
   }, []);
 
+  // Helper: derive key concepts and sample questions from AI text when structured fields missing
+  const deriveFromText = (text) => {
+    if (!text) return { keyConcepts: [], sampleQuestions: [] };
+    // Split into lines first, then fallback to sentences
+    const lines = text
+      .split(/\r?\n/) // split on newlines
+      .map((l) => l.trim())
+      .filter(Boolean);
+    let units = lines.length > 0 ? lines : text.split(/(?<=[.?!])\s+/);
+    // take up to 6 concepts
+    const keyConcepts = units.slice(0, 6).map((u, i) => {
+      const title = u.length > 100 ? u.slice(0, 97) + "..." : u;
+      return { title: title, description: u };
+    });
+    // simple question generation from concepts
+    const sampleQuestions = keyConcepts.slice(0, 6).map((c, i) => ({
+      question: `What is ${c.title.replace(/[^\w\s]/g, "")}?`,
+      type: "short-answer",
+    }));
+    return { keyConcepts, sampleQuestions };
+  };
+
   const handleFileRemove = useCallback(() => {
     setFile(null);
   }, []);
@@ -64,12 +86,25 @@ function App() {
     try {
       // Step 1: Upload the file matching Documents DB table
       const documentRecord = await api.documents.upload(file);
+
+      // accept multiple possible id fields from backend
+      const documentId =
+        documentRecord.documentId ??
+        documentRecord.id ??
+        documentRecord.documentID ??
+        documentRecord.document_id;
+      if (!documentId) {
+        throw new Error(
+          "Upload succeeded but returned no document ID. Check backend response.",
+        );
+      }
+
       setProgress(20);
       setStatusText("Queueing document for analysis...");
 
       // Step 1.5: Trigger the AI analysis background job (essential for .NET background worker)
       try {
-        await api.documents.analyze(documentRecord.documentId);
+        await api.documents.analyze(documentId);
       } catch (analysisErr) {
         console.error("Analyze error:", analysisErr);
         setStatusText(
@@ -86,9 +121,7 @@ function App() {
       const intervalId = setInterval(async () => {
         attempts++;
         try {
-          const statusRecord = await api.documents.getStatus(
-            documentRecord.documentId,
-          );
+          const statusRecord = await api.documents.getStatus(documentId);
           const status = statusRecord.processingStatus;
 
           if (status === "Processing") {
@@ -104,15 +137,36 @@ function App() {
             // Step 3: Fetch the generated analysis matching DocumentAnalyses DB table
             setTimeout(async () => {
               try {
-                const analysis = await api.analyses.getAnalysis(
-                  documentRecord.documentId,
-                );
+                const analysis = await api.analyses.getAnalysis(documentId);
                 const responseJson = JSON.parse(
                   analysis.aiResponseJson || "{}",
                 );
+                const textCandidate =
+                  analysis.aiSummary ||
+                  responseJson.aiSummary ||
+                  responseJson.extractedText ||
+                  (responseJson.candidates &&
+                    responseJson.candidates[0] &&
+                    responseJson.candidates[0].content &&
+                    responseJson.candidates[0].content.parts &&
+                    responseJson.candidates[0].content.parts[0] &&
+                    responseJson.candidates[0].content.parts[0].text) ||
+                  "";
+                const derived = deriveFromText(String(textCandidate));
+                const keyConcepts =
+                  responseJson.keyConcepts && responseJson.keyConcepts.length
+                    ? responseJson.keyConcepts
+                    : derived.keyConcepts;
+                const sampleQuestions =
+                  responseJson.sampleQuestions &&
+                  responseJson.sampleQuestions.length
+                    ? responseJson.sampleQuestions
+                    : derived.sampleQuestions;
                 setAnalysisResult({
-                  keyConcepts: responseJson.keyConcepts || [],
-                  sampleQuestions: responseJson.sampleQuestions || [],
+                  keyConcepts,
+                  sampleQuestions,
+                  aiSummary: analysis.aiSummary || responseJson.aiSummary || "",
+                  raw: responseJson,
                 });
                 setCurrentStep(3);
               } catch (e) {
@@ -322,15 +376,51 @@ function App() {
                       onClick={async () => {
                         try {
                           setLoadingHistory(true);
-                          const analysis = await api.analyses.getAnalysis(
-                            item.documentId,
-                          );
+                          const historyDocumentId =
+                            item.documentId ??
+                            item.id ??
+                            item.documentID ??
+                            item.document_id;
+                          if (!historyDocumentId)
+                            throw new Error(
+                              "History item missing document ID.",
+                            );
+                          const analysis =
+                            await api.analyses.getAnalysis(historyDocumentId);
                           const responseJson = JSON.parse(
                             analysis.aiResponseJson || "{}",
                           );
+                          const textCandidate =
+                            analysis.aiSummary ||
+                            responseJson.aiSummary ||
+                            responseJson.extractedText ||
+                            (responseJson.candidates &&
+                              responseJson.candidates[0] &&
+                              responseJson.candidates[0].content &&
+                              responseJson.candidates[0].content.parts &&
+                              responseJson.candidates[0].content.parts[0] &&
+                              responseJson.candidates[0].content.parts[0]
+                                .text) ||
+                            "";
+                          const derived = deriveFromText(String(textCandidate));
+                          const keyConcepts =
+                            responseJson.keyConcepts &&
+                            responseJson.keyConcepts.length
+                              ? responseJson.keyConcepts
+                              : derived.keyConcepts;
+                          const sampleQuestions =
+                            responseJson.sampleQuestions &&
+                            responseJson.sampleQuestions.length
+                              ? responseJson.sampleQuestions
+                              : derived.sampleQuestions;
                           setAnalysisResult({
-                            keyConcepts: responseJson.keyConcepts || [],
-                            sampleQuestions: responseJson.sampleQuestions || [],
+                            keyConcepts,
+                            sampleQuestions,
+                            aiSummary:
+                              analysis.aiSummary ||
+                              responseJson.aiSummary ||
+                              "",
+                            raw: responseJson,
                           });
                           setCurrentStep(3);
                           setCurrentView("home");

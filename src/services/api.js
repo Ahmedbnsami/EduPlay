@@ -241,13 +241,10 @@ export const api = {
       // The current API does not require or expect additional request payload.
       const opts = {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
       };
-      const hdrsForLog = { ...opts.headers };
-      if (accessToken) hdrsForLog["Authorization"] = `Bearer ${accessToken}`;
       console.debug("[API][ANALYZE] request", {
         path: `/api/documents/${documentId}/analyze`,
-        opts: { ...opts, headers: hdrsForLog },
+        opts,
       });
 
       // Retry transient 5xx errors up to 3 attempts
