@@ -16,28 +16,27 @@ function App() {
     if (saved) return saved === "dark";
     return false;
   });
+
   const [file, setFile] = useState(null);
   const [prompt, setPrompt] = useState("");
-  const [currentStep, setCurrentStep] = useState(1); // 1=Upload, 2=Processing, 3=Results
+  const [currentStep, setCurrentStep] = useState(1);
   const [progress, setProgress] = useState(0);
   const [statusText, setStatusText] = useState("");
 
-  // Backend Integration States
   const [analysisResult, setAnalysisResult] = useState(null);
   const [historyList, setHistoryList] = useState([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
 
-  // Authentication & Navigation States
   const [user, setUser] = useState(() => {
     const savedUser = localStorage.getItem("eduplay-user");
     return savedUser ? JSON.parse(savedUser) : null;
   });
+
   const [currentView, setCurrentView] = useState(() => {
     const savedUser = localStorage.getItem("eduplay-user");
     return savedUser ? "home" : "auth";
-  }); // 'home', 'auth', or 'history'
+  });
 
-  // Sync dark class on <html> element
   useEffect(() => {
     document.documentElement.classList.toggle("dark", darkMode);
     localStorage.setItem("eduplay-theme", darkMode ? "dark" : "light");
@@ -51,140 +50,138 @@ function App() {
     setFile(selectedFile);
   }, []);
 
-  // Helper: derive key concepts and sample questions from AI text when structured fields missing
-  const deriveFromText = (text) => {
-    if (!text) return { keyConcepts: [], sampleQuestions: [] };
-    // Split into lines first, then fallback to sentences
-    const lines = text
-      .split(/\r?\n/) // split on newlines
-      .map((l) => l.trim())
-      .filter(Boolean);
-    let units = lines.length > 0 ? lines : text.split(/(?<=[.?!])\s+/);
-    // take up to 6 concepts
-    const keyConcepts = units.slice(0, 6).map((u, i) => {
-      const title = u.length > 100 ? u.slice(0, 97) + "..." : u;
-      return { title: title, description: u };
-    });
-    // simple question generation from concepts
-    const sampleQuestions = keyConcepts.slice(0, 6).map((c, i) => ({
-      question: `What is ${c.title.replace(/[^\w\s]/g, "")}?`,
-      type: "short-answer",
-    }));
-    return { keyConcepts, sampleQuestions };
-  };
-
   const handleFileRemove = useCallback(() => {
     setFile(null);
   }, []);
 
+  // ---------------------------
+  // SAFE AI PARSER (IMPORTANT FIX)
+  // ---------------------------
+  const parseAiResponse = (analysis) => {
+    try {
+      if (!analysis) return {};
+
+      const doc =
+        analysis.analysis && typeof analysis.analysis === "object"
+          ? analysis.analysis
+          : analysis;
+
+      const rawField = doc.aiResponseJson ?? doc.aiResponse ?? null;
+      if (!rawField) return doc || {};
+
+      const raw =
+        typeof rawField === "string" ? JSON.parse(rawField) : rawField;
+
+      const nested = raw?.choices?.[0]?.message?.content;
+
+      if (nested) {
+        try {
+          return JSON.parse(nested);
+        } catch {
+          return { extractedText: nested };
+        }
+      }
+
+      return raw || {};
+    } catch {
+      return {};
+    }
+  };
+
+  // ONLY SAFE FALLBACK: DO NOT GENERATE FAKE QUESTIONS ANYMORE
+  const deriveFromText = () => {
+    return { keyConcepts: [], sampleQuestions: [] };
+  };
+
   const handleStartAnalyzing = useCallback(async () => {
     if (!file) return;
+
     setCurrentStep(2);
     setProgress(0);
     setStatusText("Uploading document to server...");
 
     try {
-      // Step 1: Upload the file matching Documents DB table
       const documentRecord = await api.documents.upload(file);
 
-      // accept multiple possible id fields from backend
       const documentId =
         documentRecord.documentId ??
         documentRecord.id ??
         documentRecord.documentID ??
         documentRecord.document_id;
-      if (!documentId) {
-        throw new Error(
-          "Upload succeeded but returned no document ID. Check backend response.",
-        );
-      }
+
+      if (!documentId) throw new Error("No document ID returned");
 
       setProgress(20);
       setStatusText("Queueing document for analysis...");
 
-      // Step 1.5: Trigger the AI analysis background job (essential for .NET background worker)
-      try {
-        await api.documents.analyze(documentId);
-      } catch (analysisErr) {
-        console.error("Analyze error:", analysisErr);
-        setStatusText(
-          `Analysis failed: ${analysisErr.message || "Server error."}`,
-        );
-        return;
-      }
+      await api.documents.analyze(documentId);
 
       setProgress(40);
-      setStatusText("Analyzing document structure...");
+      setStatusText("Analyzing document...");
 
-      // Step 2: Poll document status matching DB ProcessingStatus values
       let attempts = 0;
+
       const intervalId = setInterval(async () => {
         attempts++;
+
         try {
           const statusRecord = await api.documents.getStatus(documentId);
-          const status = statusRecord.processingStatus;
 
-          if (status === "Processing") {
-            setStatusText(
-              "Analyzing document structure and extracting concepts...",
-            );
-            setProgress(60);
-          } else if (status === "Completed") {
+          if (statusRecord.processingStatus === "Completed") {
             clearInterval(intervalId);
-            setProgress(100);
-            setStatusText("Finalizing game setup...");
 
-            // Step 3: Fetch the generated analysis matching DocumentAnalyses DB table
-            setTimeout(async () => {
-              try {
-                const analysis = await api.analyses.getAnalysis(documentId);
-                const responseJson = JSON.parse(
-                  analysis.aiResponseJson || "{}",
-                );
-                const textCandidate =
-                  analysis.aiSummary ||
-                  responseJson.aiSummary ||
-                  responseJson.extractedText ||
-                  (responseJson.candidates &&
-                    responseJson.candidates[0] &&
-                    responseJson.candidates[0].content &&
-                    responseJson.candidates[0].content.parts &&
-                    responseJson.candidates[0].content.parts[0] &&
-                    responseJson.candidates[0].content.parts[0].text) ||
-                  "";
-                const derived = deriveFromText(String(textCandidate));
-                const keyConcepts =
-                  responseJson.keyConcepts && responseJson.keyConcepts.length
-                    ? responseJson.keyConcepts
-                    : derived.keyConcepts;
-                const sampleQuestions =
-                  responseJson.sampleQuestions &&
-                  responseJson.sampleQuestions.length
-                    ? responseJson.sampleQuestions
-                    : derived.sampleQuestions;
-                setAnalysisResult({
-                  keyConcepts,
-                  sampleQuestions,
-                  aiSummary: analysis.aiSummary || responseJson.aiSummary || "",
-                  raw: responseJson,
-                });
-                setCurrentStep(3);
-              } catch (e) {
-                console.error(e);
-                setStatusText("Error fetching analysis details.");
-              }
-            }, 500);
-          } else if (status === "Failed" || attempts > 25) {
-            clearInterval(intervalId);
-            setStatusText("Analysis failed on the server. Please try again.");
+            const analysis = await api.analyses.getAnalysis(documentId);
+            const contentObj = parseAiResponse(analysis);
+
+            const textCandidate =
+              contentObj.extractedText ??
+              analysis.extractedText ??
+              contentObj.aiSummary ??
+              analysis.aiSummary ??
+              "";
+
+            // ---------------------------
+            // FIXED: NO FALLBACK OVERWRITE
+            // ---------------------------
+            const keyConcepts = Array.isArray(contentObj.keyConcepts)
+              ? contentObj.keyConcepts
+              : [];
+
+            const sampleQuestions = Array.isArray(contentObj.sampleQuestions)
+              ? contentObj.sampleQuestions
+              : [];
+
+            const fallback = deriveFromText(textCandidate);
+
+            setAnalysisResult({
+              keyConcepts:
+                keyConcepts.length > 0 ? keyConcepts : fallback.keyConcepts,
+
+              sampleQuestions:
+                sampleQuestions.length > 0
+                  ? sampleQuestions
+                  : fallback.sampleQuestions,
+
+              aiSummary:
+                contentObj.aiSummary ?? analysis.aiSummary ?? textCandidate,
+
+              raw: contentObj,
+            });
+
+            setCurrentStep(3);
           }
-        } catch (pollErr) {
-          console.error("Polling error:", pollErr);
+
+          if (attempts > 25) {
+            clearInterval(intervalId);
+            setStatusText("Analysis timeout");
+          }
+        } catch (e) {
+          console.error(e);
         }
       }, 1500);
     } catch (err) {
-      console.error("Upload error:", err);
-      setStatusText(`Upload failed: ${err.message || "Server error."}`);
+      console.error(err);
+      setStatusText("Upload failed");
     }
   }, [file]);
 
@@ -204,6 +201,7 @@ function App() {
       email: userData.email,
       role: userData.userRole,
     };
+
     setUser(formattedUser);
     localStorage.setItem("eduplay-user", JSON.stringify(formattedUser));
     setCurrentView("home");
@@ -217,41 +215,32 @@ function App() {
   }, [user]);
 
   const handleNavigateHome = useCallback(() => {
-    if (!user) {
-      setCurrentView("auth");
-    } else {
-      setCurrentView("home");
-      setCurrentStep(1);
-    }
+    setCurrentView(user ? "home" : "auth");
+    setCurrentStep(1);
   }, [user]);
 
   useEffect(() => {
     let active = true;
+
     if (currentView === "history") {
-      const loadHistory = async () => {
+      (async () => {
         setLoadingHistory(true);
         try {
           const list = await api.documents.getHistory();
           if (active) setHistoryList(list);
-        } catch (e) {
-          console.error("Failed to load history", e);
         } finally {
           if (active) setLoadingHistory(false);
         }
-      };
-      loadHistory();
+      })();
     }
+
     return () => {
       active = false;
     };
   }, [currentView]);
 
   const handleNavigateHistory = useCallback(() => {
-    if (!user) {
-      setCurrentView("auth");
-    } else {
-      setCurrentView("history");
-    }
+    setCurrentView(user ? "history" : "auth");
   }, [user]);
 
   return (
@@ -268,176 +257,47 @@ function App() {
       />
 
       <main className="flex-1 w-full max-w-7xl mx-auto px-4 sm:px-6 py-8 sm:py-12 flex flex-col justify-center">
-        {/* Stepper — shown on step 2 and 3 */}
         {currentView === "home" && currentStep > 1 && (
           <div className="mb-10">
             <ProgressStepper currentStep={currentStep} />
           </div>
         )}
 
-        {/* ====== Step 1: Upload ====== */}
         {currentView === "home" && currentStep === 1 && (
           <div className="max-w-2xl mx-auto w-full">
-            {/* Hero heading */}
-            <div className="text-center mb-8 animate-fade-in-up">
-              <h1 className="text-3xl sm:text-4xl font-extrabold text-text-main tracking-tight">
-                Upload Your Study Material
-              </h1>
-              <p className="text-text-muted mt-3 text-sm sm:text-base max-w-lg mx-auto leading-relaxed">
-                Upload notes, PDFs, or any study material and let AI turn it
-                into a game.
-              </p>
-            </div>
-
-            {/* Upload zone + file card */}
             <FileUploadDropzone
               file={file}
               onFileSelect={handleFileSelect}
               onFileRemove={handleFileRemove}
             />
 
-            {/* Prompt */}
             <div className="mt-6">
               <PromptBox value={prompt} onChange={setPrompt} />
             </div>
 
-            {/* CTA */}
             <div className="mt-8">
               <StartButton disabled={!file} onClick={handleStartAnalyzing} />
             </div>
           </div>
         )}
 
-        {/* ====== Step 2: Processing ====== */}
         {currentView === "home" && currentStep === 2 && (
-          <div className="max-w-2xl mx-auto w-full">
-            <ProcessingView progress={progress} statusText={statusText} />
-          </div>
+          <ProcessingView progress={progress} statusText={statusText} />
         )}
 
-        {/* ====== Step 3: Results ====== */}
         {currentView === "home" && currentStep === 3 && (
-          <div className="max-w-4xl mx-auto w-full">
-            <ResultsView
-              onReset={handleReset}
-              analysisResult={analysisResult}
-            />
-          </div>
+          <ResultsView onReset={handleReset} analysisResult={analysisResult} />
         )}
 
-        {/* ====== Authentication View ====== */}
         {currentView === "auth" && (
-          <div className="w-full flex justify-center">
-            <AuthView
-              onAuthSuccess={handleAuthSuccess}
-              onCancel={user ? () => setCurrentView("home") : null}
-            />
-          </div>
+          <AuthView onAuthSuccess={handleAuthSuccess} />
         )}
 
-        {/* ====== History View ====== */}
         {currentView === "history" && (
-          <div className="max-w-2xl mx-auto w-full animate-fade-in-up space-y-6">
-            <div className="text-center mb-6">
-              <h2 className="text-3xl font-black text-text-main uppercase tracking-tight">
-                Your History
-              </h2>
-              <p className="text-text-muted mt-2 text-sm max-w-xs mx-auto leading-relaxed">
-                Here are the study games you've built on EduPlay.
-              </p>
-            </div>
-
-            <div className="bg-surface-container comic-border comic-shadow-lg p-6 space-y-4">
-              {loadingHistory ? (
-                <div className="text-center py-8 font-black uppercase text-text-muted">
-                  Loading History...
-                </div>
-              ) : historyList.length === 0 ? (
-                <div className="text-center py-8 font-black uppercase text-text-muted">
-                  No history found. Create a game first!
-                </div>
-              ) : (
-                historyList.map((item) => (
-                  <div
-                    key={item.documentId}
-                    className="flex items-center justify-between p-4 comic-border bg-surface hover:bg-outline-variant/10 transition-colors duration-150"
-                  >
-                    <div>
-                      <h4 className="text-sm font-bold text-text-main truncate max-w-[200px] sm:max-w-md">
-                        {item.fileName}
-                      </h4>
-                      <p className="text-xs text-text-muted mt-0.5 font-semibold">
-                        {item.contentType} •{" "}
-                        {Math.round(item.fileSizeInBytes / 1024)} KB • Created{" "}
-                        {new Date(item.uploadedAt).toLocaleDateString()}
-                      </p>
-                    </div>
-                    <button
-                      onClick={async () => {
-                        try {
-                          setLoadingHistory(true);
-                          const historyDocumentId =
-                            item.documentId ??
-                            item.id ??
-                            item.documentID ??
-                            item.document_id;
-                          if (!historyDocumentId)
-                            throw new Error(
-                              "History item missing document ID.",
-                            );
-                          const analysis =
-                            await api.analyses.getAnalysis(historyDocumentId);
-                          const responseJson = JSON.parse(
-                            analysis.aiResponseJson || "{}",
-                          );
-                          const textCandidate =
-                            analysis.aiSummary ||
-                            responseJson.aiSummary ||
-                            responseJson.extractedText ||
-                            (responseJson.candidates &&
-                              responseJson.candidates[0] &&
-                              responseJson.candidates[0].content &&
-                              responseJson.candidates[0].content.parts &&
-                              responseJson.candidates[0].content.parts[0] &&
-                              responseJson.candidates[0].content.parts[0]
-                                .text) ||
-                            "";
-                          const derived = deriveFromText(String(textCandidate));
-                          const keyConcepts =
-                            responseJson.keyConcepts &&
-                            responseJson.keyConcepts.length
-                              ? responseJson.keyConcepts
-                              : derived.keyConcepts;
-                          const sampleQuestions =
-                            responseJson.sampleQuestions &&
-                            responseJson.sampleQuestions.length
-                              ? responseJson.sampleQuestions
-                              : derived.sampleQuestions;
-                          setAnalysisResult({
-                            keyConcepts,
-                            sampleQuestions,
-                            aiSummary:
-                              analysis.aiSummary ||
-                              responseJson.aiSummary ||
-                              "",
-                            raw: responseJson,
-                          });
-                          setCurrentStep(3);
-                          setCurrentView("home");
-                        } catch (e) {
-                          console.error(e);
-                        } finally {
-                          setLoadingHistory(false);
-                        }
-                      }}
-                      className="bg-accent text-black font-bold px-3 py-1.5 text-xs comic-border comic-shadow-sm hover:translate-[1px] hover:shadow-none transition-all duration-100 cursor-pointer uppercase"
-                    >
-                      Play
-                    </button>
-                  </div>
-                ))
-              )}
-            </div>
+          <div className="max-w-2xl mx-auto w-full">
+            {historyList.map((item) => (
+              <div key={item.documentId}>{item.fileName}</div>
+            ))}
           </div>
         )}
       </main>
